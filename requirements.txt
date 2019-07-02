@@ -1,0 +1,6 @@
+imageio
+sklearn
+pillow
+seaborn
+pytorch
+torchvision

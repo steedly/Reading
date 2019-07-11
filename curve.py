@@ -1,6 +1,7 @@
 import math
 import torch
 from torch.optim import Optimizer
+import copy
 
 
 class Curve(Optimizer):
@@ -46,7 +47,35 @@ class Curve(Optimizer):
         for group in self.param_groups:
             group.setdefault('amsgrad', False)
 
-    def step(self, closure=None, save_state=False, reset_state=False):
+    def save_state(self):
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                state = self.state[p]
+
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    # Exponential moving average of gradient values
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                    # Exponential moving average of squared gradient values
+                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+                    if group['amsgrad']:
+                        # Maintains max of all exp. moving avg. of sq. grad. values
+                        state['max_exp_avg_sq'] = torch.zeros_like(p.data)
+
+                self.state[p]['backup'] = copy.deepcopy(p.data)
+
+    def restore_state(self):
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                p.data = copy.deepcopy(self.state[p]['backup'])
+
+    def step(self, closure=None, eval_only=False, step_factor=1.0):
         """Performs a single optimization step.
 
         Arguments:
@@ -86,15 +115,7 @@ class Curve(Optimizer):
                     max_exp_avg_sq = state['max_exp_avg_sq']
                 beta1, beta2 = group['betas']
 
-                if reset_state is True:
-                    p.data = state['backup']
-                    if amsgrad:
-                        # Use the max. for normalizing running avg. of gradient
-                        denom = max_exp_avg_sq.sqrt().add_(group['eps'])
-                    else:
-                        denom = exp_avg_sq.sqrt().add_(group['eps'])
-                else:
-                    state['backup'] = p.data
+                if not eval_only:
                     state['step'] += 1
 
                     if group['weight_decay'] != 0:
@@ -103,17 +124,29 @@ class Curve(Optimizer):
                     # Decay the first and second moment running average coefficient
                     exp_avg.mul_(beta1).add_(1 - beta1, grad)
                     exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
-                    if amsgrad:
+
+                if amsgrad:
+                    if not eval_only:
                         # Maintains the maximum of all 2nd moment running avg. till now
                         torch.max(max_exp_avg_sq, exp_avg_sq, out=max_exp_avg_sq)
                         # Use the max. for normalizing running avg. of gradient
                         denom = max_exp_avg_sq.sqrt().add_(group['eps'])
                     else:
-                        denom = exp_avg_sq.sqrt().add_(group['eps'])
+                        # Use the max. for normalizing running avg. of gradient
+                        denom = torch.max(max_exp_avg_sq, exp_avg_sq).sqrt().add_(group['eps'])
+                else:
+                    denom = exp_avg_sq.sqrt().add_(group['eps'])
 
-                bias_correction1 = 1 - beta1 ** state['step']
-                bias_correction2 = 1 - beta2 ** state['step']
+
+                if eval_only:
+                    bias_correction1 = 1 - beta1 ** (state['step'] + 1)
+                    bias_correction2 = 1 - beta2 ** (state['step'] + 1)
+                else:
+                    bias_correction1 = 1 - beta1 ** state['step']
+                    bias_correction2 = 1 - beta2 ** state['step']
+
                 step_size = group['lr'] * math.sqrt(bias_correction2) / bias_correction1
+                step_size = step_size * step_factor
 
                 p.data.addcdiv_(-step_size, exp_avg, denom)
 
